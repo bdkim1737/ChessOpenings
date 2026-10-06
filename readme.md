@@ -14,8 +14,6 @@ moves) with the number of games played, the win and draw rates, and the
 average rating of the players. Put `openings.csv` in the same folder as
 this notebook.
 
-Libraries: `pip install pandas numpy matplotlib seaborn scipy`
-
 ``` python
 import numpy as np
 import pandas as pd
