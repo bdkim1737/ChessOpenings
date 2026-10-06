@@ -1,5 +1,5 @@
 # Chess Openings Analysis
-
+Benjamin Kim
 
 # Chess openings: which ones actually score well?
 
@@ -9,12 +9,10 @@ I wanted to answer three questions with a table of chess opening lines:
 2.  Do the most popular openings actually do better?
 3.  Does the first move (and black’s reply) matter much?
 
-Each row of `openings.csv` is one opening line (a specific sequence of
-moves) with the number of games played, the win and draw rates, and the
+Each row of `openings.csv` is one opening line, a specific sequence of
+moves, with the number of games played, the win and draw rates, and the
 average rating of the players. Put `openings.csv` in the same folder as
 this notebook.
-
-Libraries: `pip install pandas numpy matplotlib seaborn scipy`
 
 ``` python
 import numpy as np
@@ -22,8 +20,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
-
-sns.set_theme(style="whitegrid")
 
 df = pd.read_csv("openings.csv")
 print(df.shape)
@@ -58,21 +54,19 @@ df.head()
 
 ## 1. Cleaning and setup
 
-A few things about the data matter for everything below:
-
-- `Colour` is the side that made the **last move** of the line. A
-  “white” row is a line that ends on a white move (like the Scotch Game
-  after 3.d4) and a “black” row ends on a black move (like the Sicilian
-  after 1…c5). I check this below using the move list.
+- `Color` is the side that made the **last move** of the line. A “white”
+  row is a line that ends on a white move (like the Scotch Game after
+  3.d4) and a “black” row ends on a black move (like the Sicilian after
+  1…c5). I check this below using the move list.
 - `Player Win %` and `Draw %` are from the point of view of that side.
 - `Num Games` for a line doesn’t seem to include the games of the longer
-  lines that continue from it (a line often has fewer games than the
-  lines that extend it), so I treat every row as its own group of games.
+  lines that continue from it, so I treat every row as its own group of
+  games.
 
 ``` python
 # drop rows missing the columns I need, then tidy up colour and grab the ECO letter (A to E)
 df = df.dropna(subset=["Num Games", "Avg Player", "Player Win %", "Draw %"])
-df["Colour"] = df["Colour"].str.lower().str.strip()
+df["Color"] = df["Colour"].str.lower().str.strip()
 df["eco_family"] = df["ECO"].str[0]
 
 # take move numbers like "1." off the move columns in case they are there
@@ -91,7 +85,7 @@ print("share of rows where Colour is the side that moved last:", (last_mover == 
 ## 2. Score and rating adjustment
 
 Win rate alone is misleading because draws are common (around 30% of
-games). So I use **score**: a win counts 1, a draw counts 0.5 and a loss
+games). So I use score: a win counts 1, a draw counts 0.5 and a loss
 counts 0. A score above 0.5 is a good result for that side.
 
 Stronger players also score a bit better on average (`Avg Player` is the
@@ -141,27 +135,21 @@ draw.
 ``` python
 big = df[df["Num Games"] >= 500]
 
-fig, axes = plt.subplots(1, 2, figsize=(15, 7))
-
-for ax, colour in zip(axes, ["white", "black"]):
+for colour in ["white", "black"]:
     rows = big[big["Colour"] == colour]
-    best = rows.nlargest(8, "adj_score")
-    worst = rows.nsmallest(8, "adj_score")
-    both = pd.concat([best, worst]).sort_values("adj_score")
+    both = pd.concat([rows.nlargest(8, "adj_score"), rows.nsmallest(8, "adj_score")])
 
-    labels = [name[:50] + " (" + str(round(d * 100)) + "% draws)" for name, d in zip(both["Opening"], both["draw"])]
-    ax.errorbar(both["adj_score"], range(len(both)), xerr=1.96 * both["se"], fmt="o", capsize=3)
-    ax.set_yticks(range(len(both)))
-    ax.set_yticklabels(labels, fontsize=8)
-    ax.axvline(0.5, linestyle="--", color="grey")
-    ax.set_title("Lines ending with a " + colour + " move")
-    ax.set_xlabel("rating-adjusted score (win = 1, draw = 0.5)")
-
-plt.tight_layout()
-plt.show()
+    plt.figure(figsize=(8, 7))
+    sns.barplot(data=both.sort_values("adj_score", ascending=False), x="adj_score", y="Opening", color="steelblue")
+    plt.axvline(0.5, linestyle="--", color="grey")
+    plt.title("Lines ending with a " + colour + " move")
+    plt.xlabel("rating-adjusted score")
+    plt.show()
 ```
 
 ![](readme_files/figure-commonmark/cell-5-output-1.png)
+
+![](readme_files/figure-commonmark/cell-5-output-2.png)
 
 ``` python
 # the same lines as tables, with the raw score next to the adjusted one
@@ -313,13 +301,6 @@ for colour in ["white", "black"]:
 So this is useful for spotting patterns like the Sicilian, but I
 wouldn’t use it to name “the best opening”.
 
-## 4. ECO families
-
-ECO codes group openings into five families: A (flank and irregular
-openings), B (semi-open games like the Sicilian and Caro-Kann), C (open
-games and the French), D (Queen’s Gambit, Slav, Grunfeld) and E (Indian
-defences).
-
 White rows and black rows describe the same thing from opposite sides,
 so I flip everything to **white’s point of view** and combine them. The
 helper function `summarize` does a games-weighted average for any
@@ -327,7 +308,7 @@ grouping, and I reuse it in the later sections.
 
 ``` python
 # put everything from white's point of view so white rows and black rows can be combined
-is_white = df["Colour"] == "white"
+is_white = df["Color"] == "white"
 df["white_adj"] = np.where(is_white, df["adj_score"], 1 - df["adj_score"])
 df["white_win"] = np.where(is_white, df["win"], 1 - df["win"] - df["draw"])
 
