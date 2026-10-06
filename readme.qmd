@@ -1,0 +1,347 @@
+---
+title: "Chess Openings Analysis"
+author: "Benjamin Kim"
+format: gfm
+jupyter: python3
+---
+
+# Chess openings: which ones actually score well?
+
+I wanted to answer three questions with a table of chess opening lines:
+
+1. Which openings score best and worst?
+2. Do the most popular openings actually do better?
+3. Does the first move (and black's reply) matter much?
+
+Each row of `openings.csv` is one opening line (a specific sequence of moves) with the number of games played, the win and draw rates, and the average rating of the players. Put `openings.csv` in the same folder as this notebook.
+
+Libraries: `pip install pandas numpy matplotlib seaborn scipy`
+
+```{python}
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+
+sns.set_theme(style="whitegrid")
+
+df = pd.read_csv("openings.csv")
+print(df.shape)
+df.head()
+```
+
+## 1. Cleaning and setup
+
+A few things about the data matter for everything below:
+
+* `Colour` is the side that made the **last move** of the line. A "white" row is a line that ends on a white move (like the Scotch Game after 3.d4) and a "black" row ends on a black move (like the Sicilian after 1...c5). I check this below using the move list.
+* `Player Win %` and `Draw %` are from the point of view of that side.
+* `Num Games` for a line doesn't seem to include the games of the longer lines that continue from it (a line often has fewer games than the lines that extend it), so I treat every row as its own group of games.
+
+```{python}
+# drop rows missing the columns I need, then tidy up colour and grab the ECO letter (A to E)
+df = df.dropna(subset=["Num Games", "Avg Player", "Player Win %", "Draw %"])
+df["Colour"] = df["Colour"].str.lower().str.strip()
+df["eco_family"] = df["ECO"].str[0]
+
+# take move numbers like "1." off the move columns in case they are there
+move_cols = ["move1w", "move1b", "move2w", "move2b", "move3w", "move3b", "move4w", "move4b"]
+for col in move_cols:
+    df[col] = df[col].str.replace(r"^\d+\.+\s*", "", regex=True)
+
+# what does Colour mean? count the moves in each line and see who moved last
+num_moves = df["Moves"].str.split().str.len()
+last_mover = np.where(num_moves % 2 == 1, "white", "black")
+print("share of rows where Colour is the side that moved last:", (last_mover == df["Colour"]).mean())
+```
+
+## 2. Score and rating adjustment
+
+Win rate alone is misleading because draws are common (around 30% of games). So I use **score**: a win counts 1, a draw counts 0.5 and a loss counts 0. A score above 0.5 is a good result for that side.
+
+Stronger players also score a bit better on average (`Avg Player` is the average rating), which would make lines played by strong players look good for the wrong reason. To account for that I fit a line of score against `Avg Player` (separately for white rows and black rows) and subtract it out. The result is `adj_score`. This is a rough fix because it only knows the rating of one side, not the opponent's, so I keep the raw score next to the adjusted one where it matters.
+
+```{python}
+# win and draw are from the point of view of the side in the Colour column
+df["win"] = df["Player Win %"] / 100
+df["draw"] = df["Draw %"] / 100
+
+# score: win = 1, draw = 0.5, loss = 0
+df["score"] = df["win"] + 0.5 * df["draw"]
+
+# standard error of the score, used later for error bars
+variance = df["win"] + 0.25 * df["draw"] - df["score"] ** 2
+df["se"] = np.sqrt(variance.clip(lower=0) / df["Num Games"])
+
+# rating adjustment: fit score vs Avg Player (weighted by games) and remove the slope
+df["adj_score"] = df["score"]
+
+for colour in ["white", "black"]:
+    rows = df["Colour"] == colour
+    x = df.loc[rows, "Avg Player"]
+    y = df.loc[rows, "score"]
+    games = df.loc[rows, "Num Games"]
+
+    slope, intercept = np.polyfit(x, y, 1, w=np.sqrt(games))
+    df.loc[rows, "adj_score"] = y - slope * (x - x.mean())
+    print(colour, "rows: 100 more rating points is worth", round(slope * 10000, 1), "points of score")
+```
+
+## 3. Best and worst opening lines
+
+I only look at lines with at least 500 games so tiny samples don't dominate. The chart shows the 8 best and 8 worst lines for each side with 95% error bars, and the label includes how often the line ends in a draw.
+
+```{python}
+big = df[df["Num Games"] >= 500]
+
+fig, axes = plt.subplots(1, 2, figsize=(15, 7))
+
+for ax, colour in zip(axes, ["white", "black"]):
+    rows = big[big["Colour"] == colour]
+    best = rows.nlargest(8, "adj_score")
+    worst = rows.nsmallest(8, "adj_score")
+    both = pd.concat([best, worst]).sort_values("adj_score")
+
+    labels = [name[:50] + " (" + str(round(d * 100)) + "% draws)" for name, d in zip(both["Opening"], both["draw"])]
+    ax.errorbar(both["adj_score"], range(len(both)), xerr=1.96 * both["se"], fmt="o", capsize=3)
+    ax.set_yticks(range(len(both)))
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.axvline(0.5, linestyle="--", color="grey")
+    ax.set_title("Lines ending with a " + colour + " move")
+    ax.set_xlabel("rating-adjusted score (win = 1, draw = 0.5)")
+
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# the same lines as tables, with the raw score next to the adjusted one
+table_cols = ["Opening", "Num Games", "Avg Player", "draw", "score", "adj_score"]
+
+for colour in ["white", "black"]:
+    rows = big[big["Colour"] == colour]
+    print("Best 5 lines ending with a", colour, "move")
+    display(rows.nlargest(5, "adj_score")[table_cols].round(3))
+    print("Worst 5 lines ending with a", colour, "move")
+    display(rows.nsmallest(5, "adj_score")[table_cols].round(3))
+```
+
+```{python}
+# how many lines are clearly better or worse than the average line?
+# "clearly" = at least 3 points of score away from average AND outside the 95% error bar
+for colour in ["white", "black"]:
+    rows = big[big["Colour"] == colour]
+    average = np.average(rows["adj_score"], weights=rows["Num Games"])
+    gap = rows["adj_score"] - average
+    clear = (gap.abs() >= 0.03) & (gap.abs() > 1.96 * rows["se"])
+    print(colour, ":", clear.sum(), "of", len(rows), "lines are clearly different from average (average score", round(average, 3), ")")
+```
+
+### What the leaderboard shows
+
+* **The two charts agree about the Sicilian.** Sicilian lines are five of the top eight for black (adjusted score around 0.60), and six of white's eight worst lines are Sicilians too (about 0.38 to 0.44, including Boleslavsky, Bowlder Attack and Lasker-Pelikan). Seeing the same pattern from both sides makes me trust it.
+* **Some of the extreme scores look too good to be real.** "Scotch Game, General" at the top for white (about 0.87) is just the line after 3.d4: 888 games, an average rating of 1,834 (most lines are around 2,240) and only 13% draws. Its raw score is 0.78, and the adjustment adds about 9 points because the rating is low. The same opening name on the longer line (3...exd4 4.Nxd4) has a raw score of 0.62, and "Philidor Defense, General" (the line after 3.d4) shows the same thing. My guess is that these short lines collect games where the opponent left the usual moves early, so the score reflects that more than the strength of the opening.
+* **About half of the lines are clearly different from average**, but with this many games almost any gap is statistically significant, which is why I also required a gap of at least 3 points.
+
+So this is useful for spotting patterns like the Sicilian, but I wouldn't use it to name "the best opening".
+
+## 4. ECO families
+
+ECO codes group openings into five families: A (flank and irregular openings), B (semi-open games like the Sicilian and Caro-Kann), C (open games and the French), D (Queen's Gambit, Slav, Grunfeld) and E (Indian defences).
+
+White rows and black rows describe the same thing from opposite sides, so I flip everything to **white's point of view** and combine them. The helper function `summarize` does a games-weighted average for any grouping, and I reuse it in the later sections.
+
+```{python}
+# put everything from white's point of view so white rows and black rows can be combined
+is_white = df["Colour"] == "white"
+df["white_adj"] = np.where(is_white, df["adj_score"], 1 - df["adj_score"])
+df["white_win"] = np.where(is_white, df["win"], 1 - df["win"] - df["draw"])
+
+# redo the 500+ games filter so it includes the new white columns
+big = df[df["Num Games"] >= 500]
+
+
+def summarize(data, by):
+    # games-weighted average of white's score, win rate and draw rate for each group
+    data = data.copy()
+    data["score_x_games"] = data["white_adj"] * data["Num Games"]
+    data["win_x_games"] = data["white_win"] * data["Num Games"]
+    data["draw_x_games"] = data["draw"] * data["Num Games"]
+
+    out = data.groupby(by).agg(
+        openings=("Opening", "count"),
+        games=("Num Games", "sum"),
+        score_x_games=("score_x_games", "sum"),
+        win_x_games=("win_x_games", "sum"),
+        draw_x_games=("draw_x_games", "sum"),
+    )
+    out["white_score"] = out["score_x_games"] / out["games"]
+    out["white_win"] = out["win_x_games"] / out["games"]
+    out["draw_rate"] = out["draw_x_games"] / out["games"]
+    return out[["openings", "games", "white_score", "white_win", "draw_rate"]].reset_index()
+
+
+eco = summarize(big, "eco_family")
+display(eco.round(3))
+
+sns.barplot(data=eco, x="eco_family", y="white_score", color="steelblue")
+plt.axhline(0.5, linestyle="--", color="grey")
+plt.ylim(0.45, 0.6)
+plt.xlabel("ECO family")
+plt.ylabel("white's rating-adjusted score")
+plt.title("White's score by ECO family")
+plt.show()
+```
+
+### What the ECO families show
+
+White scores above 0.5 in every family. Family D (Queen's Gambit and friends) is the best for white at roughly 0.57, and family B (the Sicilian and other semi-open games) is the lowest at roughly 0.52, so that is where black gets closest to equal. The draw rates match what I would expect from chess: D and E are the drawiest (about 34% to 35%) and B has the fewest draws (about 29%). Closed positions lead to more draws and the Sicilian leads to sharper, more decisive games.
+
+## 5. Do popular openings do better?
+
+Each dot is one opening line. The x-axis is how many games it has (log scale) and the y-axis is its rating-adjusted score. I use Spearman correlation because it only cares about rank, so the log scale doesn't matter.
+
+```{python}
+pop = df[df["Num Games"] >= 50]
+
+sns.scatterplot(data=pop, x="Num Games", y="adj_score", hue="Colour", alpha=0.5)
+plt.xscale("log")
+plt.axhline(0.5, linestyle="--", color="grey")
+plt.title("Popularity vs rating-adjusted score")
+plt.show()
+
+results = []
+for colour in ["white", "black"]:
+    rows = pop[pop["Colour"] == colour]
+    raw = stats.spearmanr(rows["Num Games"], rows["score"])
+    adj = stats.spearmanr(rows["Num Games"], rows["adj_score"])
+    results.append([colour, raw.statistic, raw.pvalue, adj.statistic, adj.pvalue])
+
+pd.DataFrame(results, columns=["colour", "rho_raw", "p_raw", "rho_adjusted", "p_adjusted"]).round(3)
+```
+
+### What popularity shows
+
+There is no relationship between how often a line is played and how well it scores. The cloud is flat and the correlations are close to zero. The one clear pattern is the funnel shape: rare lines (100 to 300 games) are all over the place, from about 0.2 to 0.9, and the spread shrinks as the number of games grows. That is mostly small-sample noise. The most popular lines sit in a tight band, roughly 0.5 to 0.6 for white and 0.42 to 0.52 for black.
+
+Popular does not mean better. People pick openings for lots of reasons that have nothing to do with the score.
+
+## 6. White's first move
+
+Now I use the move columns. For each first move I take the games-weighted score from white's point of view, and only keep first moves that make up at least 1% of all games.
+
+The error bars come from a bootstrap: I resample the opening lines (rows) with replacement 1,000 times and recompute each first move's score. I did this instead of a normal standard error because the rows are not independent games, and a standard error would make the bars look much tighter than they should.
+
+```{python}
+# only rows where the first move is known
+fm = df.dropna(subset=["move1w"])
+
+first = summarize(fm, "move1w")
+first = first[first["games"] >= 0.01 * first["games"].sum()].sort_values("games", ascending=False)
+
+# bootstrap for the error bars
+fm = fm.assign(score_x_games=fm["white_adj"] * fm["Num Games"])
+boot = []
+for i in range(1000):
+    sample = fm.sample(len(fm), replace=True, random_state=i)
+    totals = sample.groupby("move1w")[["score_x_games", "Num Games"]].sum()
+    boot.append(totals["score_x_games"] / totals["Num Games"])
+boot = pd.DataFrame(boot)
+
+first["ci_low"] = first["move1w"].map(boot.quantile(0.025))
+first["ci_high"] = first["move1w"].map(boot.quantile(0.975))
+display(first.round(3))
+
+plt.bar(first["move1w"], first["white_score"],
+        yerr=[first["white_score"] - first["ci_low"], first["ci_high"] - first["white_score"]],
+        capsize=4)
+plt.axhline(0.5, linestyle="--", color="grey")
+plt.ylim(0.45, 0.6)
+plt.ylabel("white's rating-adjusted score")
+plt.title("White's score by first move (95% bootstrap interval)")
+plt.show()
+```
+
+### What the first move shows
+
+The first move only matters a little. d4 is highest at about 0.548, then c4 (0.544), Nf3 (0.542) and e4 (0.536), which is a spread of about one point. Looking at the table, e4 and d4 give white almost the same win rate (about 38.5%), but d4 has more draws (33% vs 30%), which means black wins less often against d4. So e4 is not worse because white wins less, it is worse because black gets more chances to win.
+
+A one point gap is small next to what happens on move two, which is what the next section looks at.
+
+## 7. Black's reply
+
+Same idea, but now grouped by white's first move and black's reply. A few lines with very few games make noisy cells, so I only keep combinations with at least 5,000 games.
+
+```{python}
+# keep rows where black's reply is known and white played one of the main first moves
+with_reply = fm.dropna(subset=["move1b"])
+main_moves = first["move1w"]
+
+replies = summarize(with_reply[with_reply["move1w"].isin(main_moves)], ["move1w", "move1b"])
+replies = replies[replies["games"] >= 5000]
+display(replies.sort_values("games", ascending=False).round(3))
+
+grid = replies.pivot(index="move1w", columns="move1b", values="white_score")
+
+plt.figure(figsize=(10, 4))
+sns.heatmap(grid, annot=True, fmt=".3f", cmap="RdBu_r", center=0.5,
+            cbar_kws={"label": "white's adjusted score"})
+plt.xlabel("black's reply")
+plt.ylabel("white's first move")
+plt.title("White's score by first move and black's reply")
+plt.show()
+```
+
+### What the replies show
+
+This is where the real differences are. After 1.e4, the Sicilian (...c5) is black's best answer: white scores only 0.515 over about 738,000 games, compared with 0.559 after 1.e4 e5. Since the Sicilian is also the most common reply to e4, it explains why e4 looked slightly worse in the last section.
+
+After 1.d4, black does better with ...Nf6 (white scores 0.535) than with ...d5 (0.571), and ...g6 holds up against every first move in the table (white scores between 0.486 and 0.520). White does best against the classical ...d5 after 1.d4 and ...e5 after 1.e4, and worst against ...g6 and ...c5.
+
+## 8. Opening tree
+
+One more move: white's second move, for lines with at least 1,000 games. This is the table and chart for the most played three-move lines.
+
+```{python}
+tree = with_reply.dropna(subset=["move2w"])
+tree = summarize(tree, ["move1w", "move1b", "move2w"])
+tree = tree[tree["games"] >= 1000].sort_values("games", ascending=False)
+display(tree.head(15).round(3))
+
+# chart of the 12 most played lines
+top = tree.head(12).copy()
+top["line"] = top["move1w"] + " " + top["move1b"] + " " + top["move2w"]
+
+plt.figure(figsize=(8, 5))
+plt.barh(top["line"], top["white_score"], color="steelblue")
+plt.axvline(0.5, linestyle="--", color="grey")
+plt.xlim(0.45, 0.6)
+plt.gca().invert_yaxis()
+plt.xlabel("white's rating-adjusted score")
+plt.title("Most played lines: white's score")
+plt.show()
+```
+
+### What the tree shows
+
+* 1.d4 d5 2.c4 (the Queen's Gambit) is the best large line for white at 0.577 over about 350,000 games.
+* 1.e4 c5 2.Nf3 is the toughest big line for white (0.520 over about 579,000 games), and the quieter second moves do even worse: 2.Nc3 scores 0.505 and 2.c3 scores 0.504.
+* 1.d4 Nf6 2.c4 scores 0.543 but 2.Nf3 only scores 0.496, even though both have a lot of games (592,000 and 89,000). That is a big gap for such large samples. I can't tell from this data if 2.Nf3 is actually worse or if it is chosen by a different group of players (it is the way into systems like the London, which seems popular with club players), so I would treat it as a question and not a result.
+
+## Conclusions
+
+**What I found**
+
+* The first move only matters a little (about a point of score). What black does next matters more.
+* The Sicilian is the best reply to 1.e4 and the semi-open family (B) is the one where black gets closest to equal. Queen's Gambit type positions (D) are the best for white and the drawiest.
+* Popular openings don't score better than unpopular ones.
+
+**Limits**
+
+* The data looks like one snapshot of games (almost every line was last played in 2018), so I can't say anything about trends over time.
+* The rating adjustment only uses one side's rating. The opponent's rating isn't in the data.
+* Each row seems to be the games that ended up in that exact line, so very short or rare lines can be oddly selected groups of games (see the Scotch Game example).
+* Combining hundreds of lines into one number assumes they are comparable, which they only roughly are.
+
+**Next step I'd try**: a model that predicts a line's score from its first few moves and the ECO family, to see which early moves matter most.
